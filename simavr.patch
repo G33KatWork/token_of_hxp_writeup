@@ -1,0 +1,399 @@
+diff --git a/simavr/cores/sim_tinyx5.c b/simavr/cores/sim_tinyx5.c
+index 28776db..530cbb3 100644
+--- a/simavr/cores/sim_tinyx5.c
++++ b/simavr/cores/sim_tinyx5.c
+@@ -29,6 +29,7 @@ void tx5_init(struct avr_t * avr)
+ 	struct mcu_t * mcu = (struct mcu_t*)avr;
+ 
+ 	avr_eeprom_init(avr, &mcu->eeprom);
++	avr_hackyflash_init(avr, &mcu->selfprog);
+ 	avr_watchdog_init(avr, &mcu->watchdog);
+ 	avr_extint_init(avr, &mcu->extint);
+ 	avr_ioport_init(avr, &mcu->portb);
+diff --git a/simavr/cores/sim_tinyx5.h b/simavr/cores/sim_tinyx5.h
+index ca7ef25..dd5b54e 100644
+--- a/simavr/cores/sim_tinyx5.h
++++ b/simavr/cores/sim_tinyx5.h
+@@ -26,6 +26,7 @@
+ 
+ #include "sim_core_declare.h"
+ #include "avr_eeprom.h"
++#include "avr_hackyflash.h"
+ #include "avr_watchdog.h"
+ #include "avr_extint.h"
+ #include "avr_ioport.h"
+@@ -42,6 +43,7 @@ void tx5_reset(struct avr_t * avr);
+ struct mcu_t {
+ 	avr_t core;
+ 	avr_eeprom_t 	eeprom;
++	avr_hackyflash_t 	selfprog;
+ 	avr_watchdog_t	watchdog;
+ 	avr_extint_t	extint;
+ 	avr_ioport_t	portb;
+@@ -68,6 +70,14 @@ const struct mcu_t SIM_CORENAME = {
+ 		.reset = tx5_reset,
+ 	},
+ 	AVR_EEPROM_DECLARE(EE_RDY_vect),
++	.selfprog = {
++		.spm_pagesize = SPM_PAGESIZE,
++		.r_spm = SPMCSR,
++		.selfprgen = AVR_IO_REGBIT(SPMCSR, SPMEN),
++		.pgers = AVR_IO_REGBIT(SPMCSR, PGERS),
++		.pgwrt = AVR_IO_REGBIT(SPMCSR, PGWRT),
++		.ctbp = AVR_IO_REGBIT(SPMCSR, CTPB),
++	},
+ 	AVR_WATCHDOG_DECLARE(WDTCR, WDT_vect),
+ 	.extint = {
+ 		AVR_EXTINT_TINY_DECLARE(0, 'B', PB2, GIFR),
+diff --git a/simavr/sim/avr_eeprom.c b/simavr/sim/avr_eeprom.c
+index c348f3f..1c42591 100644
+--- a/simavr/sim/avr_eeprom.c
++++ b/simavr/sim/avr_eeprom.c
+@@ -56,9 +56,11 @@ static void avr_eeprom_write(avr_t * avr, avr_io_addr_t addr, uint8_t v, void *
+ 		ee_addr = avr->data[p->r_eearl] | (avr->data[p->r_eearh] << 8);
+ 	else
+ 		ee_addr = avr->data[p->r_eearl];
++	printf("EEADDR: 0x%04x\n", ee_addr);
++	printf("foo: 0x%02x\n", p->eeprom[0]);
+ 	if (((eempe && avr_regbit_get(avr, p->eepe)) || avr_regbit_get(avr, p->eere)) &&
+ 			ee_addr >= p->size) {
+-		AVR_LOG(avr, LOG_ERROR, "EEPROM: *** %s address out of bounds: %04x > %04x,"
++		printf("EEPROM: *** %s address out of bounds: %04x > %04x,"
+ 								" wrapping to %04x (PC=%04x)\n",
+ 				eempe ? "Write" : "Read",
+ 				ee_addr, p->size-1, ee_addr & (p->size-1),
+@@ -66,7 +68,7 @@ static void avr_eeprom_write(avr_t * avr, avr_io_addr_t addr, uint8_t v, void *
+ 		ee_addr = ee_addr & (p->size-1);
+ 	}
+ 	if (eempe && avr_regbit_get(avr, p->eepe)) {	// write operation
+-		//	printf("eeprom write %04x <- %02x\n", addr, avr->data[p->r_eedr]);
++		printf("eeprom write %04x <- %02x\n", addr, avr->data[p->r_eedr]);
+ 		p->eeprom[ee_addr] = avr->data[p->r_eedr];
+ 		// Automatically clears that bit (?)
+ 		avr_regbit_clear(avr, p->eempe);
+@@ -75,7 +77,7 @@ static void avr_eeprom_write(avr_t * avr, avr_io_addr_t addr, uint8_t v, void *
+ 	}
+ 	if (avr_regbit_get(avr, p->eere)) {	// read operation
+ 		avr->data[p->r_eedr] = p->eeprom[ee_addr];
+-		//	printf("eeprom read %04x : %02x\n", addr, p->eeprom[addr]);
++		printf("eeprom read %04x : %02x\n", addr, p->eeprom[addr]);
+ 	}
+ 
+ 	// autocleared
+@@ -92,21 +94,22 @@ static int avr_eeprom_ioctl(struct avr_io_t * port, uint32_t ctl, void * io_para
+ 		case AVR_IOCTL_EEPROM_SET: {
+ 			avr_eeprom_desc_t * desc = (avr_eeprom_desc_t*)io_param;
+ 			if (!desc || !desc->size || !desc->ee || (desc->offset + desc->size) > p->size) {
+-				AVR_LOG(port->avr, LOG_WARNING, "EEPROM: %s: AVR_IOCTL_EEPROM_SET Invalid argument\n",
++				printf("EEPROM: %s: AVR_IOCTL_EEPROM_SET Invalid argument\n",
+ 						__FUNCTION__);
+ 				return -2;
+ 			}
+ 			memcpy(p->eeprom + desc->offset, desc->ee, desc->size);
+-			AVR_LOG(port->avr, LOG_TRACE, "EEPROM: %s: AVR_IOCTL_EEPROM_SET Loaded %d at offset %d\n",
++			printf("EEPROM: %s: AVR_IOCTL_EEPROM_SET Loaded %d at offset %d\n",
+ 					__FUNCTION__, desc->size, desc->offset);
+ 		}	break;
+ 		case AVR_IOCTL_EEPROM_GET: {
+ 			avr_eeprom_desc_t * desc = (avr_eeprom_desc_t*)io_param;
+ 			if (!desc || (desc->offset + desc->size) > p->size) {
+-				AVR_LOG(port->avr, LOG_WARNING, "EEPROM: %s: AVR_IOCTL_EEPROM_GET Invalid argument\n",
++				printf("EEPROM: %s: AVR_IOCTL_EEPROM_GET Invalid argument\n",
+ 						__FUNCTION__);
+ 				return -2;
+ 			}
++			printf("EEPROM read: offset: 0x%04x, size: 0x%04x\n", desc->offset, desc->size);
+ 			if (desc->ee)
+ 				memcpy(desc->ee, p->eeprom + desc->offset, desc->size);
+ 			else	// allow to get access to the read data, for gdb support
+@@ -134,11 +137,16 @@ static	avr_io_t	_io = {
+ void avr_eeprom_init(avr_t * avr, avr_eeprom_t * p)
+ {
+ 	p->io = _io;
+-//	printf("%s init (%d bytes) EEL/H:%02x/%02x EED=%02x EEC=%02x\n",
+-//			__FUNCTION__, p->size, p->r_eearl, p->r_eearh, p->r_eedr, p->r_eecr);
++	printf("%s init (%d bytes) EEL/H:%02x/%02x EED=%02x EEC=%02x\n",
++			__FUNCTION__, p->size, p->r_eearl, p->r_eearh, p->r_eedr, p->r_eecr);
+ 
+ 	p->eeprom = malloc(p->size);
+ 	memset(p->eeprom, 0xff, p->size);
++
++	FILE* f = fopen("../eeprom.bin", "rb");
++	if(!f)
++		printf("ERROR: EEPROM FILE!\n");
++	fread(p->eeprom, 32, 1, f);
+ 	
+ 	avr_register_io(avr, &p->io);
+ 	avr_register_vector(avr, &p->ready);
+diff --git a/simavr/sim/avr_hackyflash.c b/simavr/sim/avr_hackyflash.c
+new file mode 100644
+index 0000000..8866b8c
+--- /dev/null
++++ b/simavr/sim/avr_hackyflash.c
+@@ -0,0 +1,152 @@
++/*
++	avr_hackyflash.c
++
++	Copyright 2008, 2009 Michel Pollet <buserror@gmail.com>
++
++ 	This file is part of simavr.
++
++	simavr is free software: you can redistribute it and/or modify
++	it under the terms of the GNU General Public License as published by
++	the Free Software Foundation, either version 3 of the License, or
++	(at your option) any later version.
++
++	simavr is distributed in the hope that it will be useful,
++	but WITHOUT ANY WARRANTY; without even the implied warranty of
++	MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++	GNU General Public License for more details.
++
++	You should have received a copy of the GNU General Public License
++	along with simavr.  If not, see <http://www.gnu.org/licenses/>.
++ */
++
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++#include "avr_hackyflash.h"
++
++static avr_cycle_count_t avr_progen_clear(struct avr_t * avr, avr_cycle_count_t when, void * param)
++{
++	//avr_flash_t * p = (avr_flash_t *)param;
++	//avr_regbit_clear(p->io.avr, p->selfprgen);
++	//AVR_LOG(avr, LOG_WARNING, "FLASH: avr_progen_clear - SPM not received, clearing PRGEN bit\n");
++	return 0;
++}
++
++
++static void avr_hackyflash_write(avr_t * avr, avr_io_addr_t addr, uint8_t v, void * param)
++{
++	avr_hackyflash_t * p = (avr_hackyflash_t *)param;
++
++	avr_core_watch_write(avr, addr, v);
++
++	//printf("** avr_flash_write %02x\n", v);
++
++	if (avr_regbit_get(avr, p->selfprgen))
++		avr_cycle_timer_register(avr, 4, avr_progen_clear, p); // 4 cycles is very little!
++}
++
++static void avr_hackyflash_clear_temppage(avr_hackyflash_t *p)
++{
++	for (int i = 0; i < p->spm_pagesize / 2; i++) {
++		p->tmppage[i] = 0xff;
++		p->tmppage_used[i] = 0;
++	}
++}
++
++static int avr_hackyflash_ioctl(struct avr_io_t * port, uint32_t ctl, void * io_param)
++{
++ 	if (ctl != AVR_IOCTL_HACKYFLASH_SPM)
++ 		return -1;
++
++ 	avr_hackyflash_t * p = (avr_hackyflash_t *)port;
++ 	avr_t * avr = p->io.avr;
++
++ 	avr_flashaddr_t z = avr->data[R_ZL] | (avr->data[R_ZH] << 8);
++ 	if (avr->rampz)
++ 		z |= avr->data[avr->rampz] << 16;
++ 	uint16_t r01 = avr->data[0] | (avr->data[1] << 8);
++
++	//printf("AVR_IOCTL_FLASH_SPM %02x Z:%04x R01:%04x\n", avr->data[p->r_spm], z, r01);
++
++	if (avr_regbit_get(avr, p->selfprgen)) {
++		avr_cycle_timer_cancel(avr, avr_progen_clear, p);
++
++ 		if (avr_regbit_get(avr, p->pgers)) {
++ 			z &= ~1;
++ 			AVR_LOG(avr, LOG_TRACE, "FLASH: Erasing page %04x (%d)\n", (z / p->spm_pagesize), p->spm_pagesize);
++ 			for (int i = 0; i < p->spm_pagesize; i++)
++ 				avr->flash[z++] = 0xff;
++ 		} else if (avr_regbit_get(avr, p->pgwrt)) {
++ 			z &= ~(p->spm_pagesize - 1);
++ 			AVR_LOG(avr, LOG_TRACE, "FLASH: Writing page %04x (%d)\n", (z / p->spm_pagesize), p->spm_pagesize);
++
++            printf("%04x ", z);
++
++ 			for (int i = 0; i < p->spm_pagesize / 2; i++) {
++ 				avr->flash[z++] = p->tmppage[i];
++                printf("%02x", p->tmppage[i] & 0xff);
++
++ 				avr->flash[z++] = p->tmppage[i] >> 8;
++                printf("%02x", p->tmppage[i] >> 8);
++ 			}
++            printf("\n");
++ 			avr_hackyflash_clear_temppage(p);
++ 		} else if (avr_regbit_get(avr, p->ctbp)) {
++             AVR_LOG(avr, LOG_TRACE, "FLASH: Clearing temp page buffer\n");
++ 			avr_hackyflash_clear_temppage(p);
++ 		} else {
++ 			AVR_LOG(avr, LOG_TRACE, "FLASH: Writing temppage %08x (%04x)\n", z, r01);
++ 			z >>= 1;
++ 			if (!p->tmppage_used[z % (p->spm_pagesize / 2)]) {
++ 				p->tmppage[z % (p->spm_pagesize / 2)] = r01;
++ 				p->tmppage_used[z % (p->spm_pagesize / 2)] = 1;
++ 			}
++ 		}
++	}
++ 	avr_regbit_clear(avr, p->selfprgen);
++	return 0;
++}
++
++static void
++avr_hackyflash_reset(avr_io_t * port)
++{
++	avr_hackyflash_t * p = (avr_hackyflash_t *) port;
++
++	avr_hackyflash_clear_temppage(p);
++}
++
++static void
++avr_hackyflash_dealloc(struct avr_io_t * port)
++{
++	avr_hackyflash_t * p = (avr_hackyflash_t *) port;
++
++	if (p->tmppage)
++		free(p->tmppage);
++
++	if (p->tmppage_used)
++		free(p->tmppage_used);
++}
++
++static	avr_io_t	_io = {
++	.kind = "flash",
++	.ioctl = avr_hackyflash_ioctl,
++	.reset = avr_hackyflash_reset,
++	.dealloc = avr_hackyflash_dealloc,
++};
++
++void avr_hackyflash_init(avr_t * avr, avr_hackyflash_t * p)
++{
++	p->io = _io;
++	//printf("%s init SPM %04x\n", __FUNCTION__, p->r_spm);
++
++	if (!p->tmppage)
++		p->tmppage = malloc(p->spm_pagesize);
++
++	if (!p->tmppage_used)
++		p->tmppage_used = malloc(p->spm_pagesize / 2);
++
++	avr_register_io(avr, &p->io);
++	//avr_register_vector(avr, &p->flash);
++
++	avr_register_io_write(avr, p->r_spm, avr_hackyflash_write, p);
++}
+diff --git a/simavr/sim/avr_hackyflash.h b/simavr/sim/avr_hackyflash.h
+new file mode 100644
+index 0000000..e520198
+--- /dev/null
++++ b/simavr/sim/avr_hackyflash.h
+@@ -0,0 +1,96 @@
++/*
++	avr_flash.h
++
++	Copyright 2008, 2009 Michel Pollet <buserror@gmail.com>
++
++ 	This file is part of simavr.
++
++	simavr is free software: you can redistribute it and/or modify
++	it under the terms of the GNU General Public License as published by
++	the Free Software Foundation, either version 3 of the License, or
++	(at your option) any later version.
++
++	simavr is distributed in the hope that it will be useful,
++	but WITHOUT ANY WARRANTY; without even the implied warranty of
++	MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++	GNU General Public License for more details.
++
++	You should have received a copy of the GNU General Public License
++	along with simavr.  If not, see <http://www.gnu.org/licenses/>.
++ */
++
++
++#ifndef __AVR_HACKYFLASH_H___
++#define __AVR_HACKYFLASH_H___
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++#include "sim_avr.h"
++
++/*
++ * Handles self-programming subsystem if the core
++ * supports it.
++ */
++typedef struct avr_hackyflash_t {
++	avr_io_t	io;
++
++	// uint16_t	flags;
++	uint16_t	*tmppage;
++	uint8_t	*tmppage_used;
++	uint16_t	spm_pagesize;
++	uint8_t r_spm;
++	avr_regbit_t selfprgen;
++	avr_regbit_t pgers;		// page erase
++	avr_regbit_t pgwrt;		// page write
++	avr_regbit_t ctbp;		// buffer clear
++
++	// avr_regbit_t blbset;	// lock bit set
++	// avr_regbit_t rwwsre;    // read while write section read enable
++	// avr_regbit_t rwwsb;		// read while write section busy
++
++	// avr_int_vector_t flash;	// Interrupt vector
++} avr_hackyflash_t;
++
++/* Set if the flash supports a Read While Write section */
++//#define AVR_SELFPROG_HAVE_RWW (1 << 0)
++
++void avr_hackyflash_init(avr_t * avr, avr_hackyflash_t * p);
++
++
++#define AVR_IOCTL_HACKYFLASH_SPM		AVR_IOCTL_DEF('f','s','p','m')
++
++/*
++#define AVR_SELFPROG_DECLARE_INTERNAL(_spmr, _spen, _vector) \
++		.r_spm = _spmr,\
++		.spm_pagesize = SPM_PAGESIZE,\
++		.selfprgen = AVR_IO_REGBIT(_spmr, _spen),\
++		.pgers = AVR_IO_REGBIT(_spmr, PGERS),\
++		.pgwrt = AVR_IO_REGBIT(_spmr, PGWRT),\
++		.blbset = AVR_IO_REGBIT(_spmr, BLBSET),\
++		.flash = {\
++			.enable = AVR_IO_REGBIT(_spmr, SPMIE),\
++			.vector = _vector,\
++		}\
++
++#define AVR_SELFPROG_DECLARE_NORWW(_spmr, _spen, _vector) \
++	.selfprog = {\
++		.flags = 0,\
++		AVR_SELFPROG_DECLARE_INTERNAL(_spmr, _spen, _vector),\
++	}
++
++#define AVR_SELFPROG_DECLARE(_spmr, _spen, _vector) \
++	.selfprog = {\
++		.flags = AVR_SELFPROG_HAVE_RWW,\
++		AVR_SELFPROG_DECLARE_INTERNAL(_spmr, _spen, _vector),\
++		.rwwsre = AVR_IO_REGBIT(_spmr, RWWSRE),\
++		.rwwsb = AVR_IO_REGBIT(_spmr, RWWSB),\
++	}
++*/
++
++#ifdef __cplusplus
++};
++#endif
++
++#endif /* __AVR_FLASH_H___ */
+diff --git a/simavr/sim/sim_core.c b/simavr/sim/sim_core.c
+index 8ba14a8..721559c 100644
+--- a/simavr/sim/sim_core.c
++++ b/simavr/sim/sim_core.c
+@@ -951,6 +951,7 @@ run_one_again:
+ 					avr_ioctl(avr, AVR_IOCTL_WATCHDOG_RESET, 0);
+ 				}	break;
+ 				case 0x95e8: { // SPM -- Store Program Memory -- 1001 0101 1110 1000
++					//printf("SPM instruction\n");
+ 					STATE("spm\n");
+ 					avr_ioctl(avr, AVR_IOCTL_FLASH_SPM, 0);
+ 				}	break;
